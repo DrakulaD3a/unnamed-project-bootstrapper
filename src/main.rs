@@ -7,46 +7,44 @@ use crossterm::{
     ExecutableCommand,
 };
 use std::{
+    collections::HashMap,
     fmt::Display,
     io::{stdout, Write},
 };
-use strum::IntoEnumIterator;
-use strum_macros::EnumIter;
 
-struct Command<'a> {
-    command: &'a str,
+struct Command {
+    command: &'static str,
     automatic_new_folder: bool,
 }
 
-#[derive(Debug, EnumIter)]
+lazy_static::lazy_static! {
+    static ref LANGUAGES: HashMap<ProjectLanguage, Option<Command>> = {
+        HashMap::from([
+            (ProjectLanguage::Rust, Some(Command {
+                command: "cargo new",
+                automatic_new_folder: true,
+            })),
+            (ProjectLanguage::Web, None),
+            (ProjectLanguage::Cpp, None),
+            (ProjectLanguage::Ocaml, Some(Command {
+                command: "dune init project",
+                automatic_new_folder: true,
+            })),
+            (ProjectLanguage::Haskell, Some(Command {
+                command: "stack init",
+                automatic_new_folder: false,
+            })),
+        ])
+    };
+}
+
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
 enum ProjectLanguage {
     Rust,
     Web,
     Cpp,
     Ocaml,
     Haskell,
-}
-
-impl ProjectLanguage {
-    fn get_command_to_initialize(&self) -> Option<Command> {
-        use ProjectLanguage as L;
-        match self {
-            L::Rust => Some(Command {
-                command: "cargo new",
-                automatic_new_folder: true,
-            }),
-            L::Web => None,
-            L::Cpp => None,
-            L::Ocaml => Some(Command {
-                command: "dune init project",
-                automatic_new_folder: true,
-            }),
-            L::Haskell => Some(Command {
-                command: "stack init",
-                automatic_new_folder: false,
-            }),
-        }
-    }
 }
 
 impl Display for ProjectLanguage {
@@ -70,6 +68,8 @@ fn main() {
 
     let language = get_selected_language(&mut stdout).unwrap();
 
+    // TODO: Add all the work
+
     execute!(stdout, cursor::Show).unwrap();
     disable_raw_mode().unwrap();
 }
@@ -81,7 +81,8 @@ fn print_selection(stdout: &mut std::io::Stdout, selected: usize) -> Result<(), 
         style::Print("What language do you want to use?")
     )?;
 
-    for (index, language) in ProjectLanguage::iter().enumerate() {
+    for (index, language) in LANGUAGES.iter().enumerate() {
+        let language = language.0;
         crossterm::queue!(
             stdout,
             // FIXME: handle possible errors
@@ -120,5 +121,5 @@ fn get_selected_language(stdout: &mut std::io::Stdout) -> Result<ProjectLanguage
     }
 
     // FIXME: handle possible errors
-    Ok(ProjectLanguage::iter().nth(selected).unwrap())
+    Ok(*LANGUAGES.iter().nth(selected).unwrap().0)
 }
