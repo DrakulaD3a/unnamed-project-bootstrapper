@@ -1,37 +1,55 @@
 use crossterm::{
     cursor,
-    event::Event,
+    event::{Event, KeyCode},
     execute,
     style::{self, Stylize},
     terminal::{self, disable_raw_mode, enable_raw_mode},
-    ExecutableCommand,
 };
 use std::{
-    collections::HashMap,
-    fmt::Display,
-    io::{stdout, Write},
+    collections::HashMap, env, fmt::Display, fs, io::Write, path::PathBuf, process::Command as Cmd,
 };
+
+#[derive(Debug)]
+enum MyError {
+    Io(std::io::Error),
+    GracefulShutdown,
+}
+
+impl From<std::io::Error> for MyError {
+    fn from(e: std::io::Error) -> Self {
+        Self::Io(e)
+    }
+}
+
+enum CommandExists {
+    Exists(Command),
+    NotExists(Vec<&'static str>),
+}
 
 struct Command {
     command: &'static str,
+    args: Vec<&'static str>,
     automatic_new_folder: bool,
 }
 
 lazy_static::lazy_static! {
-    static ref LANGUAGES: HashMap<ProjectLanguage, Option<Command>> = {
+    static ref LANGUAGES: HashMap<ProjectLanguage, CommandExists> = {
         HashMap::from([
-            (ProjectLanguage::Rust, Some(Command {
-                command: "cargo new",
+            (ProjectLanguage::Rust, CommandExists::Exists(Command {
+                command: "cargo",
+                args: vec!["new"],
                 automatic_new_folder: true,
             })),
-            (ProjectLanguage::Web, None),
-            (ProjectLanguage::Cpp, None),
-            (ProjectLanguage::Ocaml, Some(Command {
+            (ProjectLanguage::Web, CommandExists::NotExists(vec!["index.html"])),
+            (ProjectLanguage::Cpp, CommandExists::NotExists(vec!["src", "main.cpp"])),
+            (ProjectLanguage::Ocaml, CommandExists::Exists(Command {
                 command: "dune init project",
+                args: vec!["init", "project"],
                 automatic_new_folder: true,
             })),
-            (ProjectLanguage::Haskell, Some(Command {
-                command: "stack init",
+            (ProjectLanguage::Haskell, CommandExists::Exists(Command {
+                command: "stack",
+                args: vec!["init"],
                 automatic_new_folder: false,
             })),
         ])
@@ -49,37 +67,99 @@ enum ProjectLanguage {
 
 impl Display for ProjectLanguage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        use ProjectLanguage as L;
         match self {
-            L::Rust => write!(f, "rust"),
-            L::Web => write!(f, "web"),
-            L::Cpp => write!(f, "cpp"),
-            L::Ocaml => write!(f, "ocaml"),
-            L::Haskell => write!(f, "haskell"),
+            Self::Rust => write!(f, "rust"),
+            Self::Web => write!(f, "web"),
+            Self::Cpp => write!(f, "cpp"),
+            Self::Ocaml => write!(f, "ocaml"),
+            Self::Haskell => write!(f, "haskell"),
         }
     }
 }
 
 fn main() {
-    let mut stdout = stdout();
+    let mut stdout = std::io::stdout();
 
+    // Setting up the terminal for better usability
+    execute!(stdout, terminal::EnterAlternateScreen).unwrap();
     enable_raw_mode().unwrap();
-    execute!(stdout, cursor::Hide).unwrap();
+
+    let project_name = get_project_name(&mut stdout).unwrap();
 
     let language = get_selected_language(&mut stdout).unwrap();
 
-    // TODO: Add all the work
+    let project_dir = std::env::current_dir().unwrap().join(&project_name);
+    match LANGUAGES.get(&language).unwrap() {
+        CommandExists::Exists(command) if command.automatic_new_folder => {
+            Cmd::new(command.command)
+                .args(&command.args)
+                .arg(&project_name);
+            env::set_current_dir(&project_dir).unwrap();
+        }
+        CommandExists::Exists(command) => {
+            fs::create_dir(&project_dir).unwrap();
+            env::set_current_dir(&project_dir).unwrap();
+            Cmd::new(command.command)
+                .args(&command.args)
+                .arg(&project_name);
+        }
+        CommandExists::NotExists(file) => {
+            fs::create_dir(&project_name).unwrap();
+            env::set_current_dir(&project_dir).unwrap();
 
-    execute!(stdout, cursor::Show).unwrap();
+            let mut file_copy = file.clone();
+
+            let file_name = file_copy.pop().unwrap();
+            let path: PathBuf = file_copy.iter().collect();
+            fs::create_dir_all(&path).unwrap();
+
+            env::set_current_dir(&project_dir.join(&path)).unwrap();
+            let mut file = fs::File::create(file_name).unwrap();
+            file.write(b"test").unwrap();
+        }
+    }
+
+    // Returning the terminal to the normal state
+    execute!(stdout, terminal::LeaveAlternateScreen).unwrap();
     disable_raw_mode().unwrap();
+
+    println!("Creating project {project_name} in {language}");
 }
 
-fn print_selection(stdout: &mut std::io::Stdout, selected: usize) -> Result<(), std::io::Error> {
-    crossterm::queue!(
-        stdout,
-        cursor::MoveTo(0, 0),
-        style::Print("What language do you want to use?")
-    )?;
+fn clear_screen(stdout: &mut std::io::Stdout) -> Result<(), MyError> {
+    execute!(stdout, terminal::Clear(terminal::ClearType::All))?;
+
+    crossterm::queue!(stdout, cursor::MoveTo(0, 0),)?;
+
+    stdout.flush()?;
+
+    Ok(())
+}
+
+fn get_project_name(stdout: &mut std::io::Stdout) -> Result<String, MyError> {
+    clear_screen(stdout)?;
+
+    let mut project_name = String::new();
+    while let Event::Key(key) = crossterm::event::read().unwrap() {
+        if key.modifiers == crossterm::event::KeyModifiers::CONTROL
+            && key.code == KeyCode::Char('c')
+        {
+            return Err(MyError::GracefulShutdown);
+        } else if key.code == KeyCode::Enter {
+            return Ok(project_name);
+        } else if let KeyCode::Char(c) = key.code {
+            project_name.push(c);
+            crossterm::queue!(stdout, style::Print(format!("{c}").white()))?;
+        }
+
+        stdout.flush()?;
+    }
+
+    Ok(project_name)
+}
+
+fn print_selection(stdout: &mut std::io::Stdout, selected: usize) -> Result<(), MyError> {
+    crossterm::queue!(stdout, style::Print("What language do you want to use?"))?;
 
     for (index, language) in LANGUAGES.iter().enumerate() {
         let language = language.0;
@@ -100,17 +180,15 @@ fn print_selection(stdout: &mut std::io::Stdout, selected: usize) -> Result<(), 
     Ok(())
 }
 
-fn get_selected_language(stdout: &mut std::io::Stdout) -> Result<ProjectLanguage, std::io::Error> {
+fn get_selected_language(stdout: &mut std::io::Stdout) -> Result<ProjectLanguage, MyError> {
+    execute!(stdout, cursor::Hide).unwrap();
     let mut selected = 0;
     loop {
-        stdout
-            .execute(terminal::Clear(terminal::ClearType::All))
-            .unwrap();
+        clear_screen(stdout)?;
 
         print_selection(stdout, selected).unwrap();
 
         if let Event::Key(key) = crossterm::event::read().unwrap() {
-            use crossterm::event::KeyCode;
             match key.code {
                 KeyCode::Up => selected -= 1,
                 KeyCode::Down => selected += 1,
@@ -120,6 +198,7 @@ fn get_selected_language(stdout: &mut std::io::Stdout) -> Result<ProjectLanguage
         }
     }
 
+    execute!(stdout, cursor::Show).unwrap();
     // FIXME: handle possible errors
     Ok(*LANGUAGES.iter().nth(selected).unwrap().0)
 }
