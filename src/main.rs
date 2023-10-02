@@ -6,7 +6,8 @@ use crossterm::{
     terminal::{self, disable_raw_mode, enable_raw_mode},
 };
 use std::{
-    collections::HashMap, env, fmt::Display, fs, io::Write, path::PathBuf, process::Command as Cmd,
+    collections::HashMap, env, fmt::Display, fs, io::Write, os::unix::process::CommandExt,
+    path::PathBuf, process::Command as Cmd,
 };
 
 #[derive(Debug)]
@@ -43,12 +44,12 @@ lazy_static::lazy_static! {
             (ProjectLanguage::Web, CommandExists::NotExists(vec!["index.html"])),
             (ProjectLanguage::Cpp, CommandExists::NotExists(vec!["src", "main.cpp"])),
             (ProjectLanguage::Ocaml, CommandExists::Exists(Command {
-                command: "dune init project",
+                command: "dune",
                 args: vec!["init", "project"],
                 automatic_new_folder: true,
             })),
             (ProjectLanguage::Haskell, CommandExists::Exists(Command {
-                command: "stack",
+                command: "cabal",
                 args: vec!["init"],
                 automatic_new_folder: false,
             })),
@@ -84,7 +85,11 @@ fn main() {
     execute!(stdout, terminal::EnterAlternateScreen).unwrap();
     enable_raw_mode().unwrap();
 
-    let project_name = get_project_name(&mut stdout).unwrap();
+    let project_name = match get_project_name(&mut stdout) {
+        Ok(name) => name,
+        Err(MyError::GracefulShutdown) => exit_program_gracefully(&mut stdout),
+        Err(MyError::Io(e)) => panic!("{e}"),
+    };
 
     let language = get_selected_language(&mut stdout).unwrap();
 
@@ -93,15 +98,17 @@ fn main() {
         CommandExists::Exists(command) if command.automatic_new_folder => {
             Cmd::new(command.command)
                 .args(&command.args)
-                .arg(&project_name);
-            env::set_current_dir(&project_dir).unwrap();
+                .arg(&project_name)
+                .exec();
         }
         CommandExists::Exists(command) => {
             fs::create_dir(&project_dir).unwrap();
             env::set_current_dir(&project_dir).unwrap();
+
             Cmd::new(command.command)
                 .args(&command.args)
-                .arg(&project_name);
+                .arg(&project_name)
+                .exec();
         }
         CommandExists::NotExists(file) => {
             fs::create_dir(&project_name).unwrap();
@@ -113,9 +120,9 @@ fn main() {
             let path: PathBuf = file_copy.iter().collect();
             fs::create_dir_all(&path).unwrap();
 
-            env::set_current_dir(&project_dir.join(&path)).unwrap();
+            env::set_current_dir(project_dir.join(&path)).unwrap();
             let mut file = fs::File::create(file_name).unwrap();
-            file.write(b"test").unwrap();
+            file.write_all(b"test").unwrap();
         }
     }
 
@@ -123,7 +130,7 @@ fn main() {
     execute!(stdout, terminal::LeaveAlternateScreen).unwrap();
     disable_raw_mode().unwrap();
 
-    println!("Creating project {project_name} in {language}");
+    println!("Done!");
 }
 
 fn clear_screen(stdout: &mut std::io::Stdout) -> Result<(), MyError> {
@@ -141,16 +148,22 @@ fn get_project_name(stdout: &mut std::io::Stdout) -> Result<String, MyError> {
 
     let mut project_name = String::new();
     while let Event::Key(key) = crossterm::event::read().unwrap() {
-        if key.modifiers == crossterm::event::KeyModifiers::CONTROL
-            && key.code == KeyCode::Char('c')
-        {
-            return Err(MyError::GracefulShutdown);
-        } else if key.code == KeyCode::Enter {
-            return Ok(project_name);
-        } else if let KeyCode::Char(c) = key.code {
-            project_name.push(c);
-            crossterm::queue!(stdout, style::Print(format!("{c}").white()))?;
+        let project_name = &mut project_name;
+        match key.code {
+            KeyCode::Char('c') if key.modifiers == crossterm::event::KeyModifiers::CONTROL => {
+                return Err(MyError::GracefulShutdown)
+            }
+            KeyCode::Enter => return Ok(project_name.clone()),
+            KeyCode::Backspace => {
+                project_name.pop();
+            }
+            KeyCode::Char(c) => project_name.push(c),
+            _ => {}
         }
+
+        // FIXME: I don't like this .clone() and also cleaning screen on every key press is bad
+        clear_screen(stdout)?;
+        crossterm::queue!(stdout, style::Print(project_name.clone().white()))?;
 
         stdout.flush()?;
     }
@@ -201,4 +214,12 @@ fn get_selected_language(stdout: &mut std::io::Stdout) -> Result<ProjectLanguage
     execute!(stdout, cursor::Show).unwrap();
     // FIXME: handle possible errors
     Ok(*LANGUAGES.iter().nth(selected).unwrap().0)
+}
+
+fn exit_program_gracefully(stdout: &mut std::io::Stdout) -> ! {
+    // Returning the terminal to the normal state
+    execute!(stdout, terminal::LeaveAlternateScreen).unwrap();
+    disable_raw_mode().unwrap();
+    println!("Done!");
+    std::process::exit(0)
 }
